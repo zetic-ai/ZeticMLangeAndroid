@@ -18,7 +18,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         ivy {
-            name = "ZeticMLangeGitHub"
+            name = "ZeticMLangeAndroidGitHubRelease"
             url = uri("https://github.com/zetic-ai/ZeticMLangeAndroid/releases/download")
             patternLayout {
                 artifact("[revision]/[artifact]-[revision](-[classifier]).[ext]")
