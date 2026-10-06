@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import zipfile
 from dataclasses import dataclass
@@ -77,11 +78,50 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--sdk-repository", required=True)
-    parser.add_argument("--sdk-commit", required=True)
-    parser.add_argument("--build-infra-commit", required=True)
-    parser.add_argument("--native-version", required=True)
+    parser.add_argument("--sdk-checkout", type=Path, required=True)
+    parser.add_argument("--build-infra-checkout", type=Path, required=True)
     parser.add_argument("--release-repository", required=True)
     return parser.parse_args()
+
+
+def checked_git_value(checkout: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(checkout), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def read_property(path: Path, property_name: str) -> str:
+    prefix = f"{property_name}="
+    for line in path.read_text().splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix)
+    raise ValueError(f"Missing {property_name} in {path}")
+
+
+def source_provenance(args: argparse.Namespace) -> dict[str, str]:
+    if checked_git_value(args.sdk_checkout, "status", "--porcelain"):
+        raise ValueError(f"SDK checkout is not clean: {args.sdk_checkout}")
+    if checked_git_value(args.build_infra_checkout, "status", "--porcelain"):
+        raise ValueError(f"build_infra checkout is not clean: {args.build_infra_checkout}")
+    sdk_build_infra_commit = (args.sdk_checkout / "build_infra-version.txt").read_text().strip()
+    build_infra_commit = checked_git_value(args.build_infra_checkout, "rev-parse", "HEAD")
+    if sdk_build_infra_commit != build_infra_commit:
+        raise ValueError(
+            "SDK build_infra pin does not match the supplied build_infra checkout: "
+            f"{sdk_build_infra_commit} != {build_infra_commit}"
+        )
+    return {
+        "sdk_commit": checked_git_value(args.sdk_checkout, "rev-parse", "HEAD"),
+        "build_infra_commit": build_infra_commit,
+        "native_version": read_property(
+            args.sdk_checkout / "android" / "gradle.properties",
+            "nexus.nativeVersion",
+        ),
+    }
 
 
 def main() -> int:
@@ -90,8 +130,10 @@ def main() -> int:
         raise ValueError(f"Output directory is not empty: {args.output_dir}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    provenance = source_provenance(args)
     bundle_digest = sha256_file(args.bundle)
     entries: list[BundleEntry] = []
+    module_metadata_entries: list[tuple[BundleEntry, dict]] = []
     with zipfile.ZipFile(args.bundle) as bundle:
         for source_path in bundle.namelist():
             entry = parse_entry(source_path, args.version)
@@ -137,6 +179,18 @@ def main() -> int:
                     raise ValueError(f"Unexpected metadata module in {entry.name}")
                 if component.get("version") != args.version:
                     raise ValueError(f"Unexpected metadata version in {entry.name}")
+                module_metadata_entries.append((entry, module_metadata))
+
+    asset_digests = {asset["name"]: asset["sha256"] for asset in assets}
+    for entry, module_metadata in module_metadata_entries:
+        for variant in module_metadata.get("variants", []):
+            for file_metadata in variant.get("files", []):
+                asset_name = file_metadata.get("url")
+                expected_digest = file_metadata.get("sha256")
+                if asset_name not in asset_digests:
+                    raise ValueError(f"Missing metadata asset {asset_name} in {entry.name}")
+                if asset_digests[asset_name] != expected_digest:
+                    raise ValueError(f"Metadata digest mismatch for {asset_name} in {entry.name}")
 
     manifest = {
         "schema_version": 1,
@@ -144,9 +198,7 @@ def main() -> int:
         "release_repository": args.release_repository,
         "source": {
             "sdk_repository": args.sdk_repository,
-            "sdk_commit": args.sdk_commit,
-            "build_infra_commit": args.build_infra_commit,
-            "native_version": args.native_version,
+            **provenance,
             "publication_bundle": {
                 "name": args.bundle.name,
                 "size_bytes": args.bundle.stat().st_size,
@@ -170,6 +222,12 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as error:
+    except (
+        OSError,
+        ValueError,
+        subprocess.CalledProcessError,
+        zipfile.BadZipFile,
+        json.JSONDecodeError,
+    ) as error:
         print(f"prepare_release_assets: {error}", file=sys.stderr)
         raise SystemExit(1)
