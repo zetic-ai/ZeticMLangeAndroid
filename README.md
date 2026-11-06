@@ -39,13 +39,13 @@ Then declare the SDK as usual:
 
 ```kotlin
 dependencies {
-    implementation("com.zeticai.mlange:mlange:1.12.0")
+    implementation("com.zeticai.mlange:mlange:1.13.0")
 }
 ```
 
 The tag and version must match. For example, Gradle resolves the aggregate
-metadata for `1.12.0` from
-`releases/download/1.12.0/mlange-1.12.0.module` and follows its transitive
+metadata for `1.13.0` from
+`releases/download/1.13.0/mlange-1.13.0.module` and follows its transitive
 dependencies from the same release.
 
 ## Integrity and provenance
